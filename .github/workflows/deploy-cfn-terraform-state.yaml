@@ -3,9 +3,9 @@ name: CloudFormation Plan and Deploy
 on:
   push:
     branches: [github-actions]
-    paths:
-      - 'Actions-CFN/**/*.yaml'
-      - 'Actions-CFN/**/*.yml'
+    # paths:
+    #   - 'Actions-CFN/**/*.yaml'
+    #   - 'Actions-CFN/**/*.yml'
 
 permissions:
   id-token: write
