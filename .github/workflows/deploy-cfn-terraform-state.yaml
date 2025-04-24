@@ -86,7 +86,7 @@ jobs:
               --template-body file://"$TEMPLATE" \
               --capabilities CAPABILITY_NAMED_IAM \
               --region "$AWS_REGION" \
-              --change-set-type CREATE
+              --change-set-type CREATE > /dev/null
           else
             aws cloudformation create-change-set \
               --stack-name "$STACK" \
@@ -94,12 +94,12 @@ jobs:
               --template-body file://"$TEMPLATE" \
               --capabilities CAPABILITY_NAMED_IAM \
               --region "$AWS_REGION" \
-              --change-set-type UPDATE
+              --change-set-type UPDATE > /dev/null
           fi
           aws cloudformation wait change-set-create-complete \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
-            --region "$AWS_REGION" || echo "Change set creation failed or no changes."
+            --region "$AWS_REGION" > /dev/null || echo "Change set creation failed or no changes."
           CHANGE_SET_DETAILS=$(aws cloudformation describe-change-set \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
@@ -170,23 +170,25 @@ jobs:
         if: failure()
         run: |
           echo "🧠 Diagnosing CFN deployment failure..."
-          ERR=$(aws cloudformation describe-stack-events \
-            --stack-name "${{ env.STACK_NAME }}" \
-            --region $AWS_REGION \
-            --query "StackEvents[?ResourceStatus=='CREATE_FAILED'] | [0].ResourceStatusReason" \
-            --output text || echo "Unknown error")
+          if [ -z "${{ env.STACK_NAME }}" ]; then
+            ERR="Stack name not set. Likely failed before stack creation."
+          else
+            ERR=$(aws cloudformation describe-stack-events \
+              --stack-name "${{ env.STACK_NAME }}" \
+              --region $AWS_REGION \
+              --query "StackEvents[?ResourceStatus=='CREATE_FAILED'] | [0].ResourceStatusReason" \
+              --output text 2>/dev/null || echo "Unknown error")
+          fi
           echo "💥 Error: $ERR"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            cat <<EOF > comment.txt
-            ### ❌ CloudFormation Change Set Creation Failed
-            **Stack:** \`${{ env.STACK_NAME }}\`  
-            **Template:** \`${{ matrix.file }}\`
-            🚫 **Error:**  
-            \`\`\`
-            $ERR
-            \`\`\`
-            Please review and adjust the template.
-            EOF
+            echo "### ❌ CloudFormation Change Set Creation Failed" > comment.txt
+            echo "**Stack:** \`${{ env.STACK_NAME }}\`" >> comment.txt
+            echo "**Template:** \`${{ matrix.file }}\`" >> comment.txt
+            echo "🚫 **Error:**" >> comment.txt
+            echo "\`\`\`" >> comment.txt
+            echo "$ERR" >> comment.txt
+            echo "\`\`\`" >> comment.txt
+            echo "Please review and adjust the template." >> comment.txt
           else
             echo "Push event failure logged; no PR to comment on."
           fi
