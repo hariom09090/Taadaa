@@ -1,0 +1,158 @@
+name: CloudFormation Plan and Deploy
+
+on:
+  push:
+    branches: [github-actions]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  actions: read
+
+env:
+  AWS_REGION: ap-south-1
+  CFN_FOLDER: Actions-CFN
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changed_files: ${{ steps.detect-changes.outputs.changed_files }}  # ✅ this fixes the mismatch
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: Get Changed Files
+        id: detect-changes   
+        run: |
+          echo "🕵️ Getting changed files between commits..."
+          changed_files=$(git diff --name-only HEAD^ HEAD)
+          echo "📄 Changed files:"
+          echo "$changed_files"
+
+          if [ -z "$changed_files" ]; then
+            echo "No changed files found."
+            echo "changed_files=[]" >> $GITHUB_OUTPUT
+          else
+            json_array=$(echo "$changed_files" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "JSON array of changed files:"
+            echo "$json_array"
+            echo "changed_files=$json_array" >> $GITHUB_OUTPUT
+          fi
+
+
+  deploy:
+    if: needs.detect-changes.outputs.changed_files != '[]'
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        file: ${{ fromJson(needs.detect-changes.outputs.changed_files) }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Check AWS Credentials
+        run: |
+          echo "🔑 Verifying AWS credentials..."
+          aws sts get-caller-identity
+
+      - name: Validate CFN Template – ${{ matrix.file }}
+        run: |
+          echo "✅ Validating CFN Template: ${{ matrix.file }}..."
+          aws cloudformation validate-template \
+            --template-body file://${{ matrix.file }}
+          echo "✅ Template validation completed."
+
+      - name: Deploy CFN Stack – ${{ matrix.file }}
+        run: |
+          TEMPLATE="${{ matrix.file }}"
+          STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//')
+          echo "🚀 Deploying stack '$STACK' from template '$TEMPLATE'..."
+          aws cloudformation deploy \
+            --template-file "$TEMPLATE" \
+            --stack-name "$STACK" \
+            --capabilities CAPABILITY_NAMED_IAM
+          echo "Deployment complete. Stack name: $STACK."
+          echo "STACK_NAME=$STACK" >> $GITHUB_ENV
+
+      - name: Post Deployment Summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const region = process.env.AWS_REGION;
+            const stackName = process.env.STACK_NAME;
+            const templatePath = "${{ matrix.file }}";
+            const stackUrl = `https://${region}.console.aws.amazon.com/cloudformation/home?region=${region}#/stacks/stackinfo?filteringStatus=active&filteringText=${stackName}&viewNested=true&hideStacks=false`;
+            const body = `
+            ### 🚀 CFN Deployment Summary
+
+            • **Template:** \`${templatePath}\`  
+            • **Stack:** \`${stackName}\`  
+            • 🔗 [View Stack in AWS Console](${stackUrl})
+
+            🔁 Triggered by: @${{ github.actor }} via \`${{ github.event_name }}\`
+            `;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+
+
+      - name: Dump CFN Error and Comment in PR
+        if: failure()
+        run: |
+          echo "🧠 Diagnosing CloudFormation deployment failure..."
+          ERROR_MESSAGE=$(aws cloudformation describe-stack-events \
+            --stack-name $STACK \
+            --region $AWS_REGION \
+            --query "StackEvents[?ResourceStatus=='CREATE_FAILED'] | [0].ResourceStatusReason" \
+            --output text)
+
+          echo "💥 Error: $ERROR_MESSAGE"
+
+          COMMENT=$(cat <<EOF
+          ### ❌ CloudFormation Deployment Failed
+                  
+          **Stack:** \`$STACK\`  
+          **Template:** \`${{ matrix.file }}\`
+                  
+          🚫 **Error Message:**  
+          \`\`\`
+          $ERROR_MESSAGE
+          \`\`\`
+                  
+          Please review the template and try again.
+          EOF
+          )
+                  
+              echo "$COMMENT" > comment.txt
+                  
+          - name: Comment in PR (on failure)
+            if: failure()
+            uses: actions/github-script@v7
+            with:
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+              script: |
+                const fs = require('fs');
+                const body = fs.readFileSync('comment.txt', 'utf8');
+                await github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body
+                });
+            

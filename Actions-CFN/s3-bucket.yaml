@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template to create an S3 bucket.
+  Bucket name is supplied at deploy time via parameter.
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Default: my-unique-bucket-name-1234567
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+
+Outputs:
+  BucketName:
+    Description: "The name of the S3 bucket"
+    Value: !Ref S3BucketName
+    
+
+
+
+
+
+
+
