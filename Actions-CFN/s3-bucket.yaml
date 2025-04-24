@@ -6,7 +6,7 @@ Description: >
 Parameters:
   S3BucketName:
     Type: String
-    Default: my-unique-bucket-name-1242378241313312311331
+    Default: my-unique-bucket-name-12423782413133123113312143
 
 Resources:
   S3Bucket:
