@@ -74,11 +74,21 @@ jobs:
 
       - name: Create Change Set for PR
         if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.number }}
         run: |
           TEMPLATE="${{ matrix.file }}"
           echo "📝 Creating Change Set for PR: $TEMPLATE"
           STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//')
-          CHANGE_SET_NAME="${STACK}-pr-1"
+          CHANGE_SET_NAME="${STACK}-pr-${PR_NUMBER}"
+        
+          # Check if change set already exists and delete it if it does
+          aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$CHANGE_SET_NAME" --region "$AWS_REGION" > /dev/null 2>&1
+          if [ $? -eq 0 ]; then
+            echo "Deleting existing change set $CHANGE_SET_NAME"
+            aws cloudformation delete-change-set --stack-name "$STACK" --change-set-name "$CHANGE_SET_NAME" --region "$AWS_REGION"
+          fi
+        
           STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackName" --output text 2>/dev/null || echo "false")
           if [ "$STACK_EXISTS" == "false" ]; then
               aws cloudformation create-change-set \
@@ -111,6 +121,7 @@ jobs:
           echo "$CHANGE_SET_DETAILS" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
           echo "STACK_NAME=$STACK" >> $GITHUB_ENV
+
 
       - name: Comment on PR with Change Set Details
         if: github.event_name == 'pull_request'
