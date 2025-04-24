@@ -3,9 +3,9 @@ name: CloudFormation Plan and Deploy
 on:
   push:
     branches: [github-actions]
-    # paths:
-    #   - 'Actions-CFN/**/*.yaml'
-    #   - 'Actions-CFN/**/*.yml'
+  pull_request:
+    branches: [github-actions]
+    types: [opened, synchronize, reopened]
 
 permissions:
   id-token: write
@@ -72,13 +72,81 @@ jobs:
           echo "✅ Validating CFN Template: ${{ matrix.file }}"
           aws cloudformation validate-template --template-body file://${{ matrix.file }}
 
+      - name: Echo the template file
+        run: |
+          echo "📄 Template file: ${{ matrix.file }}"
+          echo "📄 Template content:"
+          cat ${{ matrix.file }}
+          echo "📄 Template content end."
+
+      - name: Create Change Set for PR
+        if: github.event_name == 'pull_request'
+        run: |
+          TEMPLATE="${{ matrix.file }}"
+          STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//')
+          CHANGE_SET_NAME="${STACK}-pr-${{ github.event.number }}"
+          STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackName" --output text 2>/dev/null || echo "false")
+          if [ "$STACK_EXISTS" == "false" ]; then
+            aws cloudformation create-change-set \
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --template-body file://"$TEMPLATE" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --region "$AWS_REGION" \
+              --change-set-type CREATE
+          else
+            aws cloudformation create-change-set \
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --template-body file://"$TEMPLATE" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --region "$AWS_REGION" \
+              --change-set-type UPDATE
+          fi
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "$AWS_REGION" || echo "Change set creation failed or no changes."
+          CHANGE_SET_DETAILS=$(aws cloudformation describe-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "$AWS_REGION" \
+            --query "Changes[].ResourceChange" \
+            --output json || echo "[]")
+          echo "CHANGE_SET_DETAILS=$CHANGE_SET_DETAILS" >> $GITHUB_ENV
+          echo "STACK_NAME=$STACK" >> $GITHUB_ENV
+
+      - name: Comment on PR with Change Set Details
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const changeSetDetails = process.env.CHANGE_SET_DETAILS;
+            const stackName = "${{ env.STACK_NAME }}";
+            const templatePath = "${{ matrix.file }}";
+            const body = `
+            ### CloudFormation Change Set Details
+            **Stack:** \`${stackName}\`  
+            **Template:** \`${templatePath}\`
+            **Change Set Details:**
+            \`\`\`json
+            ${changeSetDetails}
+            \`\`\`
+            `;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
       - name: Deploy CFN Stack – ${{ matrix.file }}
+        if: github.event_name == 'push'
         run: |
           TEMPLATE="${{ matrix.file }}"
           STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//')
           echo "🚀 Deploying stack '$STACK' from template '$TEMPLATE'..."
-
-          # Auto-remediate ROLLBACK_COMPLETE
           STATUS=$(aws cloudformation describe-stacks \
             --stack-name "$STACK" \
             --region $AWS_REGION \
@@ -89,7 +157,6 @@ jobs:
             aws cloudformation delete-stack --stack-name "$STACK" --region $AWS_REGION
             aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region $AWS_REGION
           fi
-
           aws cloudformation deploy \
             --template-file "$TEMPLATE" \
             --stack-name "$STACK" \
@@ -98,32 +165,15 @@ jobs:
           echo "✨ Deployment complete for: $STACK"
           echo "STACK_NAME=$STACK" >> $GITHUB_ENV
 
-      - name: Post Deployment Summary
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const region = process.env.AWS_REGION;
-            const stack = process.env.STACK_NAME;
-            const template = `${{ matrix.file }}`;
-            const url = `https://${region}.console.aws.amazon.com/cloudformation/home?region=${region}#/stacks/stackinfo?filteringStatus=active&filteringText=${stack}`;
-            const body = `
-            ### 🚀 CFN Deployment Summary
-            • **Template:** \`${template}\`  
-            • **Stack:** \`${stack}\`  
-            • 🔗 [View in AWS Console](${url})
+      - name: Log Deployment Summary
+        if: github.event_name == 'push'
+        run: |
+          echo "🚀 CFN Deployment Summary"
+          echo "• Template: ${{ matrix.file }}"
+          echo "• Stack: ${{ env.STACK_NAME }}"
+          echo "• View in AWS Console: https://${{ env.AWS_REGION }}.console.aws.amazon.com/cloudformation/home?region=${{ env.AWS_REGION }}#/stacks/stackinfo?filteringStatus=active&filteringText=${{ env.STACK_NAME }}"
 
-            🔁 Triggered by: @${{ github.actor }} via \`${{ github.event_name }}\`
-            `;
-            await github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body
-            });
-
-      - name: Dump CFN Error and Comment in PR
+      - name: Dump CFN Error and Comment on PR (on Failure)
         if: failure()
         run: |
           echo "🧠 Diagnosing CFN deployment failure..."
@@ -133,19 +183,23 @@ jobs:
             --query "StackEvents[?ResourceStatus=='CREATE_FAILED'] | [0].ResourceStatusReason" \
             --output text || echo "Unknown error")
           echo "💥 Error: $ERR"
-          cat <<EOF > comment.txt
-          ### ❌ CloudFormation Deployment Failed
-          **Stack:** \`${{ env.STACK_NAME }}\`  
-          **Template:** \`${{ matrix.file }}\`
-          🚫 **Error:**  
-          \`\`\`
-          $ERR
-          \`\`\`
-          Please review and reapply.
-          EOF
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            cat <<EOF > comment.txt
+            ### ❌ CloudFormation Change Set Creation Failed
+            **Stack:** \`${{ env.STACK_NAME }}\`  
+            **Template:** \`${{ matrix.file }}\`
+            🚫 **Error:**  
+            \`\`\`
+            $ERR
+            \`\`\`
+            Please review and adjust the template.
+            EOF
+          else
+            echo "Push event failure logged; no PR to comment on."
+          fi
 
-      - name: Comment in PR (on failure)
-        if: failure()
+      - name: Comment in PR (on Failure)
+        if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
