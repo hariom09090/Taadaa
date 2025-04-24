@@ -2,9 +2,9 @@ name: CloudFormation Plan and Deploy
 
 on:
   push:
-    branches: [github-actions]
+    branches: [main]
   pull_request:
-    branches: [github-actions]
+    branches: [main]
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -71,13 +71,6 @@ jobs:
         run: |
           echo "✅ Validating CFN Template: ${{ matrix.file }}"
           aws cloudformation validate-template --template-body file://${{ matrix.file }}
-
-      - name: Echo the template file
-        run: |
-          echo "📄 Template file: ${{ matrix.file }}"
-          echo "📄 Template content:"
-          cat ${{ matrix.file }}
-          echo "📄 Template content end."
 
       - name: Create Change Set for PR
         if: github.event_name == 'pull_request'
