@@ -23,16 +23,24 @@ jobs:
     outputs:
       changed_files: ${{ steps.diff.outputs.changed_files }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v3
         with:
           fetch-depth: 2
 
-      - name: Detect Changed CFN Templates
+      - name: Get Changed Files
         id: diff
         run: |
-          files=$(git diff --name-only HEAD^ HEAD -- "${{ env.CFN_FOLDER }}/*.yaml" "${{ env.CFN_FOLDER }}/*.yml" | jq -R -s -c 'split("\n") | map(select(length>0))')
-          echo "changed_files=$files" >> $GITHUB_OUTPUT
+          echo "🕵️ Detecting CFN template changes..."
+          files=$(git diff --name-only HEAD^ HEAD -- "${{ env.CFN_FOLDER }}/*.yaml" "${{ env.CFN_FOLDER }}/*.yml")
+          echo "📄 Changed files:"
+          echo "$files"
+          if [ -z "$files" ]; then
+            echo "changed_files=[]" >> $GITHUB_OUTPUT
+          else
+            json=$(echo "$files" | jq -R -s -c 'split("\n") | map(select(length>0))')
+            echo "changed_files=$json" >> $GITHUB_OUTPUT
+          fi
 
   plan:
     needs: detect-changes
@@ -46,17 +54,22 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v3
 
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Validate CFN Template
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
+
+      - name: Validate CFN Template – ${{ matrix.file }}
         run: |
+          echo "✅ Validating CFN Template: ${{ matrix.file }}"
           aws cloudformation validate-template --template-body file://${{ matrix.file }}
 
       - name: Check Stack Existence and Create Change Set
