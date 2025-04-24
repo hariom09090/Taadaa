@@ -29,7 +29,8 @@ jobs:
         id: detect-changes   
         run: |
           echo "🕵️ Getting changed files between commits..."
-          changed_files=$(git diff --name-only HEAD^ HEAD)
+          changed_files=$(git diff --name-only HEAD^ HEAD -- "${{ env.CFN_FOLDER }}/*.yaml" "${{ env.CFN_FOLDER }}/*.yml")
+
           echo "📄 Changed files:"
           echo "$changed_files"
 
