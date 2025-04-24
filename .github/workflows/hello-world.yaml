@@ -3,7 +3,7 @@ name: Hello World Workflow
 on:
   push:
     branches:
-      - main  # or any branch you’re testing on
+      - github-actions  # or any branch you’re testing on
 
 jobs:
   say-hello:
