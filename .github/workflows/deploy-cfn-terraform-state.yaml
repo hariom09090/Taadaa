@@ -26,13 +26,17 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v3
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Get Changed Files
         id: diff
         run: |
           echo "🕵️ Detecting CFN template changes..."
-          files=$(git diff --name-only HEAD^ HEAD -- "${{ env.CFN_FOLDER }}/*.yaml" "${{ env.CFN_FOLDER }}/*.yml")
+          if [ "${{ github.event_name }}" = "push" ]; then
+            files=$(git diff --name-only origin/main^ origin/main -- "${{ env.CFN_FOLDER }}/*.yaml" "${{ env.CFN_FOLDER }}/*.yml")
+          else
+            files=$(git diff --name-only origin/main HEAD -- "${{ env.CFN_FOLDER }}/*.yaml" "${{ env.CFN_FOLDER }}/*.yml")
+          fi
           echo "📄 Changed files:"
           echo "$files"
           if [ -z "$files" ]; then
@@ -46,6 +50,8 @@ jobs:
     needs: detect-changes
     if: github.event_name == 'pull_request' && needs.detect-changes.outputs.changed_files != '[]'
     runs-on: ubuntu-latest
+    outputs:
+      change_set_names: ${{ steps.change-set.outputs.change_set_names }}
     strategy:
       matrix:
         file: ${{ fromJson(needs.detect-changes.outputs.changed_files) }}
@@ -79,6 +85,7 @@ jobs:
           STACK=$(basename "$TEMPLATE" .yaml | sed 's/\.yml$//')
           echo "STACK_NAME=$STACK" >> $GITHUB_ENV
           CHANGE_SET_NAME="${STACK}-pr-${{ github.event.number }}"
+          echo "CHANGE_SET_NAME=$CHANGE_SET_NAME" >> $GITHUB_ENV
           
           # Check if stack exists
           if aws cloudformation describe-stacks --stack-name "$STACK" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
@@ -101,15 +108,39 @@ jobs:
             --template-body file://"$TEMPLATE" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region "${{ env.AWS_REGION }}" \
-            --change-set-type "$CHANGE_SET_TYPE"
+            --change-set-type "$CHANGE_SET_TYPE" || {
+            echo "Failed to create change set" >&2
+            exit 1
+          }
           
-          # Wait for change set to be ready
+          # Wait for change set to be ready and check status
           aws cloudformation wait change-set-create-complete \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
             --region "${{ env.AWS_REGION }}" || true
           
-          # Describe change set
+          # Verify change set status
+          CHANGE_SET_STATUS=$(aws cloudformation describe-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'Status' \
+            --output text)
+          CHANGE_SET_REASON=$(aws cloudformation describe-change-set \
+            --stack-name "$STACK" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'StatusReason' \
+            --output text || echo "No reason provided")
+          echo "CHANGE_SET_STATUS=$CHANGE_SET_STATUS" >> $GITHUB_ENV
+          echo "CHANGE_SET_REASON=$CHANGE_SET_REASON" >> $GITHUB_ENV
+          
+          if [ "$CHANGE_SET_STATUS" = "FAILED" ]; then
+            echo "Change set creation failed: $CHANGE_SET_REASON" >&2
+            exit 1
+          fi
+          
+          # Describe change set for PR comment
           CHANGE_SET_DETAILS=$(aws cloudformation describe-change-set \
             --stack-name "$STACK" \
             --change-set-name "$CHANGE_SET_NAME" \
@@ -118,6 +149,10 @@ jobs:
             --output json | jq -c .)
           echo "CHANGE_SET_DETAILS=$CHANGE_SET_DETAILS" >> $GITHUB_ENV
           echo "CHANGE_SET_TYPE=$CHANGE_SET_TYPE" >> $GITHUB_ENV
+          
+          # Output change set name for deploy job
+          json=$(echo "$CHANGE_SET_NAME" | jq -R -c '[.]')
+          echo "change_set_names=$json" >> $GITHUB_OUTPUT
 
       - name: Comment on PR with Change Set Details
         if: success()
@@ -157,11 +192,13 @@ jobs:
           script: |
             const stackName = process.env.STACK_NAME || 'Unknown';
             const templatePath = "${{ matrix.file }}";
+            const changeSetReason = process.env.CHANGE_SET_REASON || 'Unknown error';
             const body = `
             ### ❌ CloudFormation Change Set Creation Failed
             **Stack:** \`${stackName}\`  
             **Template:** \`${templatePath}\`  
-            **Error:** Check the GitHub Actions logs for details.
+            **Error:** ${changeSetReason}
+            Please check the GitHub Actions logs for more details.
             `;
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -198,40 +235,70 @@ jobs:
           COMMIT_MSG="${{ github.event.head_commit.message }}"
           if [[ $COMMIT_MSG =~ Merge\ pull\ request\ \#([0-9]+) ]]; then
             echo "pr_number=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          else
+            echo "pr_number=" >> $GITHUB_OUTPUT
           fi
 
-      - name: Deploy CFN Stack
+      - name: Execute Existing Change Set or Deploy
         id: deploy
         run: |
           TEMPLATE="${{ matrix.file }}"
           STACK=$(basename "$TEMPLATE" .yaml | sed 's/\.yml$//')
           echo "STACK_NAME=$STACK" >> $GITHUB_ENV
+          CHANGE_SET_NAME="${STACK}-pr-${{ steps.extract-pr.outputs.pr_number }}"
           
-          # Check stack status
-          STATUS=$(aws cloudformation describe-stacks \
+          # Check if stack exists
+          if aws cloudformation describe-stacks --stack-name "$STACK" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            STATUS=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK" \
+              --region "${{ env.AWS_REGION }}" \
+              --query "Stacks[0].StackStatus" \
+              --output text 2>/dev/null || echo "NOT_FOUND")
+            if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
+              aws cloudformation delete-stack --stack-name "$STACK" --region "${{ env.AWS_REGION }}"
+              aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "${{ env.AWS_REGION }}"
+            fi
+          fi
+          
+          # Check if change set exists from PR
+          if [ -n "${{ steps.extract-pr.outputs.pr_number }}" ] && aws cloudformation describe-change-set \
             --stack-name "$STACK" \
-            --region "${{ env.AWS_REGION }}" \
-            --query "Stacks[0].StackStatus" \
-            --output text 2>/dev/null || echo "NOT_FOUND")
-          
-          if [ "$STATUS" = "ROLLBACK_COMPLETE" ]; then
-            aws cloudformation delete-stack --stack-name "$STACK" --region "${{ env.AWS_REGION }}"
-            aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "${{ env.AWS_REGION }}"
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "Executing existing change set: $CHANGE_SET_NAME"
+            aws cloudformation execute-change-set \
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "${{ env.AWS_REGION }}"
+            aws cloudformation wait stack-update-complete \
+              --stack-name "$STACK" \
+              --region "${{ env.AWS_REGION }}" || aws cloudformation wait stack-create-complete \
+              --stack-name "$STACK" \
+              --region "${{ env.AWS_REGION }}"
+          else
+            echo "No change set found or no PR number. Falling back to deploy command."
+            aws cloudformation deploy \
+              --template-file "$TEMPLATE" \
+              --stack-name "$STACK" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changeset \
+              --region "${{ env.AWS_REGION }}"
           fi
 
-          # cat template file content
-          echo "📄 Template file content:"
-          cat "$TEMPLATE"
-          echo "Template file: $TEMPLATE"
-          echo "Stack name: $STACK"
-
-          
-          aws cloudformation deploy \
-            --template-file "$TEMPLATE" \
+      - name: Clean Up Change Set
+        if: always() && steps.extract-pr.outputs.pr_number
+        run: |
+          STACK="${{ env.STACK_NAME }}"
+          CHANGE_SET_NAME="${STACK}-pr-${{ steps.extract-pr.outputs.pr_number }}"
+          if aws cloudformation describe-change-set \
             --stack-name "$STACK" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset \
-            --region "${{ env.AWS_REGION }}"
+            --change-set-name "$CHANGE_SET_NAME" \
+            --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            aws cloudformation delete-change-set \
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "${{ env.AWS_REGION }}"
+          fi
 
       - name: Comment on PR with Deployment Success
         if: success() && steps.extract-pr.outputs.pr_number
@@ -264,18 +331,11 @@ jobs:
             const prNumber = ${{ steps.extract-pr.outputs.pr_number }};
             const stackName = process.env.STACK_NAME;
             const templatePath = "${{ matrix.file }}";
-            const error = await (async () => {
-              try {
-                return await exec('aws cloudformation describe-stack-events --stack-name "' + stackName + '" --region "${{ env.AWS_REGION }}" --query "StackEvents[?ResourceStatus==\'CREATE_FAILED\' || ResourceStatus==\'UPDATE_FAILED\'][0].ResourceStatusReason" --output text');
-              } catch (e) {
-                return 'Unknown error';
-              }
-            })();
             const body = `
             ### ❌ CloudFormation Deployment Failed
             **Stack:** \`${stackName}\`  
             **Template:** \`${templatePath}\`  
-            **Error:** \`${error}\`
+            **Error:** Check the GitHub Actions logs for details.
             `;
             await github.rest.issues.createComment({
               issue_number: prNumber,
