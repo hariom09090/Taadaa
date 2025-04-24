@@ -219,9 +219,12 @@ jobs:
             aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "${{ env.AWS_REGION }}"
           fi
 
-          # cat template file
+          # cat template file content
+          echo "📄 Template file content:"
+          cat "$TEMPLATE"
           echo "Template file: $TEMPLATE"
           echo "Stack name: $STACK"
+
           
           aws cloudformation deploy \
             --template-file "$TEMPLATE" \
