@@ -76,37 +76,40 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           TEMPLATE="${{ matrix.file }}"
+          echo "📝 Creating Change Set for PR: $TEMPLATE"
           STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//')
-          CHANGE_SET_NAME="${STACK}-pr-${{ github.event.number }}"
+          CHANGE_SET_NAME="${STACK}-pr-1"
           STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackName" --output text 2>/dev/null || echo "false")
           if [ "$STACK_EXISTS" == "false" ]; then
-            aws cloudformation create-change-set \
-              --stack-name "$STACK" \
-              --change-set-name "$CHANGE_SET_NAME" \
-              --template-body file://"$TEMPLATE" \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --region "$AWS_REGION" \
-              --change-set-type CREATE > /dev/null
+              aws cloudformation create-change-set \
+                --stack-name "$STACK" \
+                --change-set-name "$CHANGE_SET_NAME" \
+                --template-body file://"$TEMPLATE" \
+                --capabilities CAPABILITY_NAMED_IAM \
+                --region "$AWS_REGION" \
+                --change-set-type CREATE > /dev/null
           else
-            aws cloudformation create-change-set \
-              --stack-name "$STACK" \
-              --change-set-name "$CHANGE_SET_NAME" \
-              --template-body file://"$TEMPLATE" \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --region "$AWS_REGION" \
-              --change-set-type UPDATE > /dev/null
+              aws cloudformation create-change-set \
+                --stack-name "$STACK" \
+                --change-set-name "$CHANGE_SET_NAME" \
+                --template-body file://"$TEMPLATE" \
+                --capabilities CAPABILITY_NAMED_IAM \
+                --region "$AWS_REGION" \
+                --change-set-type UPDATE > /dev/null
           fi
           aws cloudformation wait change-set-create-complete \
-            --stack-name "$STACK" \
-            --change-set-name "$CHANGE_SET_NAME" \
-            --region "$AWS_REGION" > /dev/null || echo "Change set creation failed or no changes."
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "$AWS_REGION" > /dev/null || echo "Change set creation failed or no changes."
           CHANGE_SET_DETAILS=$(aws cloudformation describe-change-set \
-            --stack-name "$STACK" \
-            --change-set-name "$CHANGE_SET_NAME" \
-            --region "$AWS_REGION" \
-            --query "Changes[].ResourceChange" \
-            --output json || echo "[]")
-          echo "CHANGE_SET_DETAILS=$CHANGE_SET_DETAILS" >> $GITHUB_ENV
+              --stack-name "$STACK" \
+              --change-set-name "$CHANGE_SET_NAME" \
+              --region "$AWS_REGION" \
+              --query "Changes[].ResourceChange" \
+              --output json || echo "[]")
+          echo "CHANGE_SET_DETAILS<<EOF" >> $GITHUB_ENV
+          echo "$CHANGE_SET_DETAILS" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
           echo "STACK_NAME=$STACK" >> $GITHUB_ENV
 
       - name: Comment on PR with Change Set Details
