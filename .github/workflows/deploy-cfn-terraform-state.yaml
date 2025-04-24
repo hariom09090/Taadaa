@@ -2,7 +2,7 @@ name: CloudFormation Plan and Deploy
 
 on:
   push:
-    branches: [github-actions]
+    branches: [main]
 
 permissions:
   id-token: write
