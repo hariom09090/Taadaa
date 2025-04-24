@@ -72,26 +72,51 @@ jobs:
           echo "✅ Validating CFN Template: ${{ matrix.file }}"
           aws cloudformation validate-template --template-body file://${{ matrix.file }}
 
-      - name: Create Change Set for PR
+            - name: Create Change Set for PR
         if: github.event_name == 'pull_request'
         env:
           PR_NUMBER: ${{ github.event.number }}
         run: |
           TEMPLATE="${{ matrix.file }}"
           echo "📝 Creating Change Set for PR: $TEMPLATE"
-          STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//')
-          CHANGE_SET_NAME="${STACK}-pr-${PR_NUMBER}"
-          aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$CHANGE_SET_NAME" --region "$AWS_REGION" > /dev/null 2>&1
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "❌ Template file $TEMPLATE does not exist"
+            exit 1
+          fi
+          STACK=$(basename "$TEMPLATE" | sed -E 's/\.(yaml|yml)$//') || {
+            echo "❌ Failed to extract stack name from $TEMPLATE"
+            exit 1
+          }
+          echo "STACK_NAME=$STACK" >> $GITHUB_ENV || {
+            echo "❌ Failed to set STACK_NAME in GITHUB_ENV"
+            exit 1
+          }
+          CHANGE_SET_NAME="${STACK}-pr-${PR_NUMBER}" || {
+            echo "❌ Failed to construct CHANGE_SET_NAME"
+            exit 1
+          }
+          aws cloudformation describe-change-set --stack-name "$STACK" --change-set-name "$CHANGE_SET_NAME" --region "$AWS_REGION" 2>&1 | tee describe-change-set.log || {
+            echo "⚠️ No existing change set $CHANGE_SET_NAME found or error occurred"
+            cat describe-change-set.log
+            # Continue, as change set not existing is expected
+          }
           if [ $? -eq 0 ]; then
             echo "Deleting existing change set $CHANGE_SET_NAME"
-            aws cloudformation delete-change-set --stack-name "$STACK" --change-set-name "$CHANGE_SET_NAME" --region "$AWS_REGION" || {
+            aws cloudformation delete-change-set --stack-name "$STACK" --change-set-name "$CHANGE_SET_NAME" --region "$AWS_REGION" 2>&1 | tee delete-change-set.log || {
               echo "❌ Failed to delete change set $CHANGE_SET_NAME"
+              cat delete-change-set.log
               exit 1
             }
           fi
-          STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackName" --output text 2>/dev/null || echo "false")
+          STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackName" --output text 2>&1 || echo "false") || {
+            echo "❌ Failed to check stack existence for $STACK"
+            exit 1
+          }
           if [ "$STACK_EXISTS" != "false" ]; then
-            STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "UNKNOWN")
+            STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" --query "Stacks[0].StackStatus" --output text 2>&1 || echo "UNKNOWN") || {
+              echo "❌ Failed to retrieve stack status for $STACK"
+              exit 1
+            }
             if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "ROLLBACK_FAILED" ]; then
               echo "❌ Stack $STACK is in $STATUS state and cannot be updated. Please delete the stack manually or handle this state."
               exit 1
@@ -130,18 +155,30 @@ jobs:
               --region "$AWS_REGION" 2>&1 | tee wait-change-set.log || {
               echo "⚠️ Change set creation failed or no changes detected."
               cat wait-change-set.log
+              exit 0  # Allow continuation if no changes
             }
           CHANGE_SET_DETAILS=$(aws cloudformation describe-change-set \
               --stack-name "$STACK" \
               --change-set-name "$CHANGE_SET_NAME" \
               --region "$AWS_REGION" \
               --query "Changes[].ResourceChange" \
-              --output json 2>&1 || echo "[]")
-          echo "CHANGE_SET_DETAILS<<EOF" >> $GITHUB_ENV
-          echo "$CHANGE_SET_DETAILS" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "STACK_NAME=$STACK" >> $GITHUB_ENV
-
+              --output json 2>&1 || echo "[]") || {
+              echo "❌ Failed to describe change set $CHANGE_SET_NAME"
+              exit 1
+            }
+          echo "CHANGE_SET_DETAILS<<EOF" >> $GITHUB_ENV || {
+            echo "❌ Failed to set CHANGE_SET_DETAILS in GITHUB_ENV"
+            exit 1
+          }
+          echo "$CHANGE_SET_DETAILS" >> $GITHUB_ENV || {
+            echo "❌ Failed to write CHANGE_SET_DETAILS to GITHUB_ENV"
+            exit 1
+          }
+          echo "EOF" >> $GITHUB_ENV || {
+            echo "❌ Failed to complete CHANGE_SET_DETAILS in GITHUB_ENV"
+            exit 1
+          }
+            
       - name: Comment on PR with Change Set Details
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
