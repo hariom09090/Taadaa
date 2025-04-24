@@ -6,7 +6,7 @@ Description: >
 Parameters:
   S3BucketName:
     Type: String
-    Default: statefile-workflow-s3-bucket-3414132
+    Default: statefile-workflow-s3-bucket-34141321
 
 Resources:
   S3Bucket:
