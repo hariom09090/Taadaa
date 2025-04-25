@@ -1,24 +1,89 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  CloudFormation template to create an S3 bucket.
-  Bucket name is supplied at deploy time via parameter.
+  Simplified CloudFormation template to create an S3 bucket for Terraform state file management.
+  Includes versioning and a dynamic bucket policy based on a provided IAM principal ARN, with default parameters.
 
 Parameters:
-  S3BucketName:
+  BucketName:
     Type: String
-    Default: statefile-workflow-s3-bucket-name-1
+    Description: The name of the S3 bucket to store Terraform state files. Must be globally unique.
+    Default: terraform-state-bucket-1234525
+    AllowedPattern: ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$
+    ConstraintDescription: Bucket name must be 3-63 characters, lowercase, numbers, and hyphens, starting and ending with a letter or number.
+
+  TerraformPrincipalArn:
+    Type: String
+    Description: The ARN of the IAM principal (e.g., role or user) that Terraform will use to access the state bucket.
+    Default: arn:aws:iam::630757018547:role/TerraformRole
+    AllowedPattern: ^arn:aws:iam::[0-9]{12}:(role|user)/[a-zA-Z_0-9+=,.@\-_/]+$
+    ConstraintDescription: Must be a valid IAM role or user ARN (e.g., arn:aws:iam::123456789012:role/TerraformRole).
 
 Resources:
-  S3Bucket:
+  TerraformStateBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Ref S3BucketName
-      AccessControl: Private
+      BucketName: !Ref BucketName
       VersioningConfiguration:
         Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Purpose
+          Value: TerraformState
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowTerraformAccess
+            Effect: Allow
+            Principal:
+              AWS: !Ref TerraformPrincipalArn
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::${BucketName}
+              - !Sub arn:aws:s3:::${BucketName}/*
+          - Sid: EnforceTLS
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${BucketName}
+              - !Sub arn:aws:s3:::${BucketName}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
 
 Outputs:
   BucketName:
-    Description: "The name of the S3 bucket"
-    Value: !Ref S3BucketName
+    Description: The name of the S3 bucket for Terraform state files.
+    Value: !Ref TerraformStateBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-BucketName
 
+  BucketArn:
+    Description: The ARN of the S3 bucket for Terraform state files.
+    Value: !GetAtt TerraformStateBucket.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-BucketArn
+
+  TerraformPrincipalArn:
+    Description: The IAM principal ARN granted access to the bucket.
+    Value: !Ref TerraformPrincipalArn
+    Export:
+      Name: !Sub ${AWS::StackName}-TerraformPrincipalArn
