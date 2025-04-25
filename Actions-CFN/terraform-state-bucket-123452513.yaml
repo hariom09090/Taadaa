@@ -38,6 +38,7 @@ Resources:
         - Key: Purpose
           Value: TerraformState
 
+
   TerraformStateBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
