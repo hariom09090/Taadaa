@@ -7,7 +7,7 @@ Parameters:
   BucketName:
     Type: String
     Description: The name of the S3 bucket to store Terraform state files. Must be globally unique.
-    Default: terraform-state-bucket-123452576
+    Default: terraform-state-bucket-452576
     AllowedPattern: ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$
     ConstraintDescription: Bucket name must be 3-63 characters, lowercase, numbers, and hyphens, starting and ending with a letter or number.
 
